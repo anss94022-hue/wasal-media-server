@@ -1,0 +1,22 @@
+# Wasal Server
+
+Backend server for the Wasal Android messaging application.
+
+## Features
+
+- Five-digit user codes
+- User names
+- Text messaging
+- Real-time messaging with Socket.io
+- Image uploads
+- Short video uploads
+- Link messages
+- Conversation history
+- JWT authentication
+- Health check endpoint
+
+## Start
+
+```bash
+npm install
+npm start
