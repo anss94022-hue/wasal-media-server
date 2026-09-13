@@ -1,22 +1,98 @@
 # Wasal Server
 
-Backend server for the Wasal Android messaging application.
+خادم تطبيق وصال للمراسلة الفورية على Android.
 
-## Features
+## الوظائف
 
-- Five-digit user codes
-- User names
-- Text messaging
-- Real-time messaging with Socket.io
-- Image uploads
-- Short video uploads
-- Link messages
-- Conversation history
-- JWT authentication
-- Health check endpoint
+- إنشاء مستخدم برمز فريد من 5 أرقام.
+- حفظ اسم المستخدم.
+- إرسال واستقبال الرسائل النصية.
+- المراسلة الفورية باستخدام Socket.io.
+- إرسال واستقبال الصور.
+- إرسال واستقبال الفيديوهات القصيرة.
+- إرسال واستقبال الروابط.
+- حفظ سجل المحادثات.
+- فصل محادثات المستخدمين عن بعضها.
+- المصادقة باستخدام JWT.
+- رفع ملفات الوسائط.
+- فحص حالة الخادم من خلال /health.
 
-## Start
+## التقنيات
 
-```bash
+- Node.js
+- Express
+- Socket.io
+- SQLite
+- JWT
+- Multer
+- CORS
+
+## تشغيل الخادم
+
 npm install
 npm start
+
+## فحص الخادم
+
+GET /health
+
+## واجهات المستخدمين
+
+POST /api/users/create
+
+GET /api/users/:code
+
+## واجهات المحادثات
+
+GET /api/conversations/:code/messages
+
+POST /api/messages
+
+POST /api/messages/media
+
+POST /api/messages/link
+
+## رفع الصور والفيديوهات
+
+POST /api/media/upload
+
+الحد الأقصى لحجم الملف: 100 MB
+
+الأنواع المدعومة:
+
+- JPEG
+- PNG
+- WebP
+- GIF
+- MP4
+- WebM
+- QuickTime
+
+## المراسلة الفورية
+
+يستخدم الخادم Socket.io لإرسال الرسائل واستقبالها في الوقت الحقيقي.
+
+## المصادقة
+
+يستخدم الخادم JWT لحماية حسابات المستخدمين وعمليات المراسلة ورفع الوسائط.
+
+## متغيرات البيئة
+
+PORT=3000
+JWT_SECRET=ضع_مفتاحًا_سريًا_قويًا_هنا
+
+## ملاحظة
+
+البريد الإلكتروني ليس مطلوبًا لإنشاء المستخدم العادي.
+
+سيتم استخدام البريد الإلكتروني لاحقًا كخيار للنسخ الاحتياطي واستعادة بيانات المستخدم.
+
+## المشروع
+
+اسم الخادم:
+
+wasal-media-server
+
+اسم التطبيق:
+
+وصال
