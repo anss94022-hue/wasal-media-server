@@ -211,16 +211,16 @@ app.get('/health', (_, res) => {
   res.json({
     ok: true,
     service: 'wasal-server',
-    version: '3.1.0',
+    version: '3.2.0',
     time: new Date().toISOString()
   });
 });
 
 app.get('/', (_, res) => {
-  res.json({ ok: true, service: 'wasal-server', version: '3.1.0' });
+  res.json({ ok: true, service: 'wasal-server', version: '3.2.0' });
 });
 
-// دعم كافة مسارات التسجيل المحتملة في تطبيق الهاتف
+// مسارات التسجيل مع دعم pin_code في المستوى الرئيسي وكائن المستخدم
 app.post(['/api/users/create', '/api/auth/register'], (req, res) => {
   const name = String(req.body?.name || req.body?.username || '').trim();
   const email = String(req.body?.email || '').trim();
@@ -248,6 +248,7 @@ app.post(['/api/users/create', '/api/auth/register'], (req, res) => {
 
   res.json({
     ok: true,
+    pin_code: pinCode,
     user,
     token: createToken(user)
   });
