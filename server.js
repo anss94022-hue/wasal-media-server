@@ -203,11 +203,11 @@ function saveMessage({ senderCode, receiverCode, type, text = null, mediaUrl = n
 // Endpoints
 // --------------------------------------------------
 app.get('/health', (_, res) => {
-  res.json({ ok: true, service: 'wasal-server', version: '3.3.0' });
+  res.json({ ok: true, service: 'wasal-server', version: '3.4.0' });
 });
 
 app.get('/', (_, res) => {
-  res.json({ ok: true, service: 'wasal-server', version: '3.3.0' });
+  res.json({ ok: true, service: 'wasal-server', version: '3.4.0' });
 });
 
 app.post(['/api/users/create', '/api/auth/register'], (req, res) => {
@@ -260,7 +260,7 @@ app.get('/api/conversations/:code/messages', auth, (req, res) => {
   res.json({ ok: true, messages });
 });
 
-// دعم مساري المحادثات (/api/chats و /api/conversations) لضمان التوافق التام
+// إرجاع مصفوفة مباشرة كما يتوقعها التطبيق تماماً لـ /api/chats و /api/conversations
 const getConversationsHandler = (req, res) => {
   const rows = db.prepare(`
     SELECT
@@ -290,7 +290,7 @@ const getConversationsHandler = (req, res) => {
     return { user, lastMessage };
   });
 
-  res.json({ ok: true, chats, conversations: chats });
+  res.json(chats);
 };
 
 app.get('/api/chats', auth, getConversationsHandler);
