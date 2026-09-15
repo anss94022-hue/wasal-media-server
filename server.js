@@ -199,28 +199,17 @@ function saveMessage({ senderCode, receiverCode, type, text = null, mediaUrl = n
   };
 }
 
-function removeExpiredStatuses() {
-  const now = new Date().toISOString();
-  db.prepare('DELETE FROM statuses WHERE expires_at <= ?').run(now);
-}
-
 // --------------------------------------------------
 // Endpoints
 // --------------------------------------------------
 app.get('/health', (_, res) => {
-  res.json({
-    ok: true,
-    service: 'wasal-server',
-    version: '3.2.0',
-    time: new Date().toISOString()
-  });
+  res.json({ ok: true, service: 'wasal-server', version: '3.3.0' });
 });
 
 app.get('/', (_, res) => {
-  res.json({ ok: true, service: 'wasal-server', version: '3.2.0' });
+  res.json({ ok: true, service: 'wasal-server', version: '3.3.0' });
 });
 
-// مسارات التسجيل مع دعم pin_code في المستوى الرئيسي وكائن المستخدم
 app.post(['/api/users/create', '/api/auth/register'], (req, res) => {
   const name = String(req.body?.name || req.body?.username || '').trim();
   const email = String(req.body?.email || '').trim();
@@ -271,7 +260,8 @@ app.get('/api/conversations/:code/messages', auth, (req, res) => {
   res.json({ ok: true, messages });
 });
 
-app.get('/api/conversations', auth, (req, res) => {
+// دعم مساري المحادثات (/api/chats و /api/conversations) لضمان التوافق التام
+const getConversationsHandler = (req, res) => {
   const rows = db.prepare(`
     SELECT
       CASE WHEN sender_code = ? THEN receiver_code ELSE sender_code END AS otherCode,
@@ -282,7 +272,7 @@ app.get('/api/conversations', auth, (req, res) => {
     ORDER BY lastMessageId DESC
   `).all(req.user.code, req.user.code, req.user.code);
 
-  const conversations = rows.map(row => {
+  const chats = rows.map(row => {
     const user = getUser(row.otherCode);
     const lastMessage = db.prepare(`
       SELECT
@@ -300,8 +290,11 @@ app.get('/api/conversations', auth, (req, res) => {
     return { user, lastMessage };
   });
 
-  res.json({ ok: true, conversations });
-});
+  res.json({ ok: true, chats, conversations: chats });
+};
+
+app.get('/api/chats', auth, getConversationsHandler);
+app.get('/api/conversations', auth, getConversationsHandler);
 
 app.post('/api/messages', auth, (req, res) => {
   const receiverCode = String(req.body?.receiverCode || '').trim();
