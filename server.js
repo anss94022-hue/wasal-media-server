@@ -44,6 +44,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
+    pin_code TEXT,
+    phone TEXT,
     name TEXT NOT NULL,
     email TEXT,
     password TEXT,
@@ -147,17 +149,20 @@ function auth(req, res, next) {
   }
 }
 
-function getUser(code) {
+function getUser(codeOrId) {
   return db.prepare(`
     SELECT
       id,
       code,
+      pin_code AS pinCode,
+      pin_code,
+      phone,
       name,
       email,
       created_at AS createdAt
     FROM users
-    WHERE code = ?
-  `).get(code);
+    WHERE code = ? OR id = ?
+  `).get(codeOrId, codeOrId);
 }
 
 function userExists(code) {
@@ -203,17 +208,18 @@ function saveMessage({ senderCode, receiverCode, type, text = null, mediaUrl = n
 // Endpoints
 // --------------------------------------------------
 app.get('/health', (_, res) => {
-  res.json({ ok: true, service: 'wasal-server', version: '3.4.0' });
+  res.json({ ok: true, service: 'wasal-server', version: '3.5.0' });
 });
 
 app.get('/', (_, res) => {
-  res.json({ ok: true, service: 'wasal-server', version: '3.4.0' });
+  res.json({ ok: true, service: 'wasal-server', version: '3.5.0' });
 });
 
 app.post(['/api/users/create', '/api/auth/register'], (req, res) => {
   const name = String(req.body?.name || req.body?.username || '').trim();
   const email = String(req.body?.email || '').trim();
   const password = String(req.body?.password || '').trim();
+  const phone = String(req.body?.phone || req.body?.phoneNumber || '').trim();
 
   if (!name) {
     return res.status(400).json({ error: 'اسم المستخدم مطلوب' });
@@ -223,14 +229,16 @@ app.post(['/api/users/create', '/api/auth/register'], (req, res) => {
   const pinCode = String(Math.floor(1000 + Math.random() * 9000));
 
   const result = db.prepare(`
-    INSERT INTO users (code, name, email, password, created_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(code, name, email || null, password || null, new Date().toISOString());
+    INSERT INTO users (code, pin_code, phone, name, email, password, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(code, pinCode, phone || null, name, email || null, password || null, new Date().toISOString());
 
   const user = {
     id: Number(result.lastInsertRowid),
     code,
     pin_code: pinCode,
+    pinCode,
+    phone: phone || null,
     name,
     email: email || null
   };
@@ -241,6 +249,14 @@ app.post(['/api/users/create', '/api/auth/register'], (req, res) => {
     user,
     token: createToken(user)
   });
+});
+
+app.get('/api/users/me', auth, (req, res) => {
+  const user = getUser(req.user.code);
+  if (!user) {
+    return res.status(404).json({ error: 'المستخدم غير موجود' });
+  }
+  res.json({ ok: true, user });
 });
 
 app.get('/api/users/:code', auth, (req, res) => {
@@ -260,7 +276,6 @@ app.get('/api/conversations/:code/messages', auth, (req, res) => {
   res.json({ ok: true, messages });
 });
 
-// إرجاع مصفوفة مباشرة كما يتوقعها التطبيق تماماً لـ /api/chats و /api/conversations
 const getConversationsHandler = (req, res) => {
   const rows = db.prepare(`
     SELECT
@@ -400,7 +415,7 @@ io.use((socket, next) => {
     socket.user = jwt.verify(token, JWT_SECRET);
     next();
   } catch {
-    next(new Error('Invalid authentication'));
+    next(token ? new Error('Invalid authentication') : new Error('Authentication required'));
   }
 });
 
