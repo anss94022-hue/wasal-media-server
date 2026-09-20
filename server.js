@@ -10,7 +10,9 @@ import { Server } from 'socket.io';
 import Database from 'better-sqlite3';
 
 const PORT = Number(process.env.PORT || 3000);
-const JWT_SECRET = process.env.JWT_SECRET || 'WASAL_CHANGE_THIS_SECRET';
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  'WASAL_CHANGE_THIS_SECRET';
 
 const app = express();
 const httpServer = createServer(app);
@@ -37,7 +39,10 @@ fs.mkdirSync(MEDIA_DIR, { recursive: true });
 // --------------------------------------------------
 // Database
 // --------------------------------------------------
-const db = new Database(path.join(DATA_DIR, 'wasal.db'));
+const db = new Database(
+  path.join(DATA_DIR, 'wasal.db')
+);
+
 db.pragma('journal_mode = WAL');
 
 db.exec(`
@@ -93,9 +98,20 @@ db.exec(`
 // --------------------------------------------------
 // Database migrations
 // --------------------------------------------------
-function ensureColumn(tableName, columnName, definition) {
-  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
-  const exists = columns.some(column => column.name === columnName);
+function ensureColumn(
+  tableName,
+  columnName,
+  definition
+) {
+  const columns = db
+    .prepare(
+      `PRAGMA table_info(${tableName})`
+    )
+    .all();
+
+  const exists = columns.some(
+    column => column.name === columnName
+  );
 
   if (!exists) {
     db.exec(
@@ -104,22 +120,40 @@ function ensureColumn(tableName, columnName, definition) {
   }
 }
 
-ensureColumn('users', 'pin_code', 'TEXT');
-ensureColumn('users', 'phone', 'TEXT');
+ensureColumn(
+  'users',
+  'pin_code',
+  'TEXT'
+);
+
+ensureColumn(
+  'users',
+  'phone',
+  'TEXT'
+);
 
 // --------------------------------------------------
 // Media
 // --------------------------------------------------
-app.use('/media', express.static(MEDIA_DIR));
+app.use(
+  '/media',
+  express.static(MEDIA_DIR)
+);
 
 const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, MEDIA_DIR),
+  destination: (_, __, cb) =>
+    cb(null, MEDIA_DIR),
 
   filename: (_, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    const ext =
+      path.extname(
+        file.originalname
+      ).toLowerCase();
 
     const safeName =
-      `${Date.now()}-${Math.random().toString(36).substring(2, 10)}${ext}`;
+      `${Date.now()}-${Math.random()
+        .toString(36)
+        .substring(2, 10)}${ext}`;
 
     cb(null, safeName);
   }
@@ -129,7 +163,8 @@ const upload = multer({
   storage,
 
   limits: {
-    fileSize: 100 * 1024 * 1024
+    fileSize:
+      100 * 1024 * 1024
   },
 
   fileFilter: (_, file, cb) => {
@@ -143,10 +178,18 @@ const upload = multer({
       'video/quicktime'
     ];
 
-    if (allowed.includes(file.mimetype)) {
+    if (
+      allowed.includes(
+        file.mimetype
+      )
+    ) {
       cb(null, true);
     } else {
-      cb(new Error('نوع الملف غير مسموح'));
+      cb(
+        new Error(
+          'نوع الملف غير مسموح'
+        )
+      );
     }
   }
 });
@@ -157,11 +200,16 @@ const upload = multer({
 function generateUserCode() {
   for (;;) {
     const code = String(
-      Math.floor(10000 + Math.random() * 90000)
+      Math.floor(
+        10000 +
+        Math.random() * 90000
+      )
     );
 
     const exists = db
-      .prepare('SELECT id FROM users WHERE code = ?')
+      .prepare(
+        'SELECT id FROM users WHERE code = ?'
+      )
       .get(code);
 
     if (!exists) {
@@ -172,50 +220,232 @@ function generateUserCode() {
 
 function generatePinCode() {
   return String(
-    Math.floor(1000 + Math.random() * 9000)
+    Math.floor(
+      1000 +
+      Math.random() * 9000
+    )
   );
 }
 
-function createToken(user) {
+// --------------------------------------------------
+// Access Token
+// --------------------------------------------------
+function createAccessToken(user) {
   return jwt.sign(
     {
       code: user.code,
-      name: user.name
+      name: user.name,
+      type: 'access'
     },
     JWT_SECRET,
     {
-      expiresIn: '365d'
+      expiresIn: '15m'
     }
   );
 }
 
-function auth(req, res, next) {
-  const authorization =
-    req.headers.authorization || '';
+// --------------------------------------------------
+// Refresh Token
+// --------------------------------------------------
+function createRefreshToken(user) {
+  return jwt.sign(
+    {
+      code: user.code,
+      type: 'refresh'
+    },
+    JWT_SECRET,
+    {
+      expiresIn: '30d'
+    }
+  );
+}
 
-  const token = authorization
-    .replace(/^Bearer\s+/i, '')
-    .trim();
+// --------------------------------------------------
+// Backward compatibility
+// --------------------------------------------------
+// أي مكان قديم في المشروع يستدعي createToken()
+// سيحصل الآن على Access Token مدته 15 دقيقة.
+function createToken(user) {
+  return createAccessToken(user);
+}
 
-  if (!token) {
-    return res.status(401).json({
-      error: 'رمز الدخول مطلوب'
-    });
-  }
-
-  try {
-    req.user = jwt.verify(
+// --------------------------------------------------
+// Verify Access Token
+// --------------------------------------------------
+function verifyAccessToken(token) {
+  const payload =
+    jwt.verify(
       token,
       JWT_SECRET
     );
 
+  if (
+    !payload ||
+    typeof payload !== 'object'
+  ) {
+    throw new Error(
+      'INVALID_TOKEN'
+    );
+  }
+
+  if (
+    typeof payload.code !==
+    'string' ||
+    !payload.code
+  ) {
+    throw new Error(
+      'INVALID_TOKEN'
+    );
+  }
+
+  // Refresh Token لا يستخدم للوصول إلى API.
+  if (
+    payload.type ===
+    'refresh'
+  ) {
+    throw new Error(
+      'REFRESH_TOKEN_NOT_ALLOWED'
+    );
+  }
+
+  // التوكن القديم بدون type
+  // يبقى مقبولًا للتوافق مع الجلسات القديمة.
+  return payload;
+}
+
+// --------------------------------------------------
+// Authentication Middleware
+// --------------------------------------------------
+function auth(
+  req,
+  res,
+  next
+) {
+  const authorization =
+    req.headers.authorization ||
+    '';
+
+  const token =
+    authorization
+      .replace(
+        /^Bearer\s+/i,
+        ''
+      )
+      .trim();
+
+  if (!token) {
+    return res.status(401).json({
+      error:
+        'رمز الدخول مطلوب'
+    });
+  }
+
+  try {
+    req.user =
+      verifyAccessToken(
+        token
+      );
+
     next();
   } catch {
     return res.status(401).json({
-      error: 'رمز الدخول غير صالح أو منتهي'
+      error:
+        'رمز الدخول غير صالح أو منتهي'
     });
   }
 }
+
+// --------------------------------------------------
+// Refresh Access Token
+// --------------------------------------------------
+app.post(
+  '/api/auth/refresh',
+  (req, res) => {
+    const refreshToken =
+      String(
+        req.body?.refreshToken ||
+        req.body?.refresh_token ||
+        ''
+      ).trim();
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        error:
+          'Refresh Token مطلوب'
+      });
+    }
+
+    try {
+      const payload =
+        jwt.verify(
+          refreshToken,
+          JWT_SECRET
+        );
+
+      if (
+        !payload ||
+        typeof payload !==
+          'object'
+      ) {
+        return res.status(401).json({
+          error:
+            'Refresh Token غير صالح'
+        });
+      }
+
+      if (
+        typeof payload.code !==
+        'string' ||
+        !payload.code
+      ) {
+        return res.status(401).json({
+          error:
+            'Refresh Token غير صالح'
+        });
+      }
+
+      // يجب أن يكون Refresh Token.
+      // التوكن القديم بدون type مسموح
+      // للتوافق مع الإصدارات السابقة.
+      if (
+        payload.type !==
+          'refresh' &&
+        payload.type != null
+      ) {
+        return res.status(401).json({
+          error:
+            'Refresh Token غير صالح'
+        });
+      }
+
+      const user =
+        getUser(payload.code);
+
+      if (!user) {
+        return res.status(401).json({
+          error:
+            'المستخدم غير موجود'
+        });
+      }
+
+      const accessToken =
+        createAccessToken(
+          user
+        );
+
+      return res.json({
+        ok: true,
+        accessToken
+      });
+
+    } catch {
+      return res.status(401).json({
+        error:
+          'Refresh Token غير صالح أو منتهي'
+      });
+    }
+  }
+);
 
 function getUser(codeOrId) {
   return db.prepare(`
@@ -230,18 +460,26 @@ function getUser(codeOrId) {
       created_at AS createdAt
     FROM users
     WHERE code = ? OR id = ?
-  `).get(codeOrId, codeOrId);
+  `).get(
+    codeOrId,
+    codeOrId
+  );
 }
 
 function userExists(code) {
   return Boolean(
     db
-      .prepare('SELECT id FROM users WHERE code = ?')
+      .prepare(
+        'SELECT id FROM users WHERE code = ?'
+      )
       .get(code)
   );
 }
 
-function conversationMessages(a, b) {
+function conversationMessages(
+  a,
+  b
+) {
   return db.prepare(`
     SELECT
       id,
@@ -257,7 +495,12 @@ function conversationMessages(a, b) {
       OR
       (sender_code = ? AND receiver_code = ?)
     ORDER BY id ASC
-  `).all(a, b, b, a);
+  `).all(
+    a,
+    b,
+    b,
+    a
+  );
 }
 
 function saveMessage({
@@ -290,7 +533,10 @@ function saveMessage({
   );
 
   return {
-    id: Number(result.lastInsertRowid),
+    id:
+      Number(
+        result.lastInsertRowid
+      ),
     senderCode,
     receiverCode,
     type,
@@ -303,52 +549,72 @@ function saveMessage({
 // --------------------------------------------------
 // Health
 // --------------------------------------------------
-app.get('/health', (_, res) => {
-  res.json({
-    ok: true,
-    service: 'wasal-server',
-    version: '3.6.0'
-  });
-});
+app.get(
+  '/health',
+  (_, res) => {
+    res.json({
+      ok: true,
+      service:
+        'wasal-server',
+      version:
+        '3.6.0'
+    });
+  }
+);
 
-app.get('/', (_, res) => {
-  res.json({
-    ok: true,
-    service: 'wasal-server',
-    version: '3.6.0'
-  });
-});
+app.get(
+  '/',
+  (_, res) => {
+    res.json({
+      ok: true,
+      service:
+        'wasal-server',
+      version:
+        '3.6.0'
+    });
+  }
+);
 
 // --------------------------------------------------
 // Registration
 // --------------------------------------------------
 app.post(
-  ['/api/users/create', '/api/auth/register'],
+  [
+    '/api/users/create',
+    '/api/auth/register'
+  ],
   (req, res) => {
     try {
-      const name = String(
-        req.body?.name ||
-        req.body?.username ||
-        ''
-      ).trim();
+      const name =
+        String(
+          req.body?.name ||
+          req.body?.username ||
+          ''
+        ).trim();
 
-      const email = String(
-        req.body?.email || ''
-      ).trim();
+      const email =
+        String(
+          req.body?.email ||
+          ''
+        ).trim();
 
-      const password = String(
-        req.body?.password || ''
-      ).trim();
+      const password =
+        String(
+          req.body?.password ||
+          ''
+        ).trim();
 
-      const phone = String(
-        req.body?.phone ||
-        req.body?.phoneNumber ||
-        ''
-      ).trim();
+      const phone =
+        String(
+          req.body?.phone ||
+          req.body?.phoneNumber ||
+          ''
+        ).trim();
 
       if (!name) {
         return res.status(400).json({
-          error: 'اسم المستخدم مطلوب'
+          error:
+            'اسم المستخدم مطلوب'
         });
       }
 
@@ -380,23 +646,52 @@ app.post(
       );
 
       const user = {
-        id: Number(
-          result.lastInsertRowid
-        ),
+        id:
+          Number(
+            result.lastInsertRowid
+          ),
         code,
-        pin_code: pinCode,
+        pin_code:
+          pinCode,
         pinCode,
-        phone: phone || null,
+        phone:
+          phone || null,
         name,
-        email: email || null
+        email:
+          email || null
       };
+
+      // --------------------------------------------------
+      // إصدار التوكنات عند التسجيل
+      // --------------------------------------------------
+      const accessToken =
+        createAccessToken(
+          user
+        );
+
+      const refreshToken =
+        createRefreshToken(
+          user
+        );
 
       return res.json({
         ok: true,
-        pin_code: pinCode,
+
+        pin_code:
+          pinCode,
+
         pinCode,
+
         user,
-        token: createToken(user)
+
+        // للتوافق مع التطبيق الحالي
+        token:
+          accessToken,
+
+        // الاسم الصريح الجديد
+        accessToken,
+
+        refreshToken
       });
 
     } catch (error) {
@@ -406,8 +701,10 @@ app.post(
       );
 
       return res.status(500).json({
-        error: 'تعذر إنشاء الحساب',
-        details: error.message
+        error:
+          'تعذر إنشاء الحساب',
+        details:
+          error.message
       });
     }
   }
@@ -421,11 +718,14 @@ app.get(
   auth,
   (req, res) => {
     const user =
-      getUser(req.user.code);
+      getUser(
+        req.user.code
+      );
 
     if (!user) {
       return res.status(404).json({
-        error: 'المستخدم غير موجود'
+        error:
+          'المستخدم غير موجود'
       });
     }
 
@@ -445,7 +745,8 @@ app.get(
   (req, res) => {
     const code =
       String(
-        req.params.code || ''
+        req.params.code ||
+        ''
       ).trim();
 
     const user =
@@ -453,7 +754,8 @@ app.get(
 
     if (!user) {
       return res.status(404).json({
-        error: 'المستخدم غير موجود'
+        error:
+          'المستخدم غير موجود'
       });
     }
 
@@ -473,19 +775,29 @@ app.get(
   (req, res) => {
     const otherCode =
       String(
-        req.params.code || ''
+        req.params.code ||
+        ''
       ).trim();
 
-    if (!/^\d{5}$/.test(otherCode)) {
+    if (
+      !/^\d{5}$/.test(
+        otherCode
+      )
+    ) {
       return res.status(400).json({
         error:
           'رمز المستخدم يجب أن يتكون من 5 أرقام'
       });
     }
 
-    if (!userExists(otherCode)) {
+    if (
+      !userExists(
+        otherCode
+      )
+    ) {
       return res.status(404).json({
-        error: 'المستخدم غير موجود'
+        error:
+          'المستخدم غير موجود'
       });
     }
 
@@ -507,53 +819,57 @@ app.get(
 // --------------------------------------------------
 const getConversationsHandler =
   (req, res) => {
+    const rows =
+      db.prepare(`
+        SELECT
+          CASE
+            WHEN sender_code = ?
+            THEN receiver_code
+            ELSE sender_code
+          END AS otherCode,
+          MAX(id) AS lastMessageId
+        FROM messages
+        WHERE
+          sender_code = ?
+          OR receiver_code = ?
+        GROUP BY otherCode
+        ORDER BY lastMessageId DESC
+      `).all(
+        req.user.code,
+        req.user.code,
+        req.user.code
+      );
 
-    const rows = db.prepare(`
-      SELECT
-        CASE
-          WHEN sender_code = ?
-          THEN receiver_code
-          ELSE sender_code
-        END AS otherCode,
-        MAX(id) AS lastMessageId
-      FROM messages
-      WHERE
-        sender_code = ?
-        OR receiver_code = ?
-      GROUP BY otherCode
-      ORDER BY lastMessageId DESC
-    `).all(
-      req.user.code,
-      req.user.code,
-      req.user.code
-    );
+    const chats =
+      rows.map(
+        row => {
+          const user =
+            getUser(
+              row.otherCode
+            );
 
-    const chats = rows.map(row => {
+          const lastMessage =
+            db.prepare(`
+              SELECT
+                id,
+                sender_code AS senderCode,
+                receiver_code AS receiverCode,
+                type,
+                text,
+                media_url AS mediaUrl,
+                created_at AS createdAt
+              FROM messages
+              WHERE id = ?
+            `).get(
+              row.lastMessageId
+            );
 
-      const user =
-        getUser(row.otherCode);
-
-      const lastMessage =
-        db.prepare(`
-          SELECT
-            id,
-            sender_code AS senderCode,
-            receiver_code AS receiverCode,
-            type,
-            text,
-            media_url AS mediaUrl,
-            created_at AS createdAt
-          FROM messages
-          WHERE id = ?
-        `).get(
-          row.lastMessageId
-        );
-
-      return {
-        user,
-        lastMessage
-      };
-    });
+          return {
+            user,
+            lastMessage
+          };
+        }
+      );
 
     res.json(chats);
   };
@@ -577,18 +893,23 @@ app.post(
   '/api/messages',
   auth,
   (req, res) => {
-
     const receiverCode =
       String(
-        req.body?.receiverCode || ''
+        req.body?.receiverCode ||
+        ''
       ).trim();
 
     const text =
       String(
-        req.body?.text || ''
+        req.body?.text ||
+        ''
       ).trim();
 
-    if (!/^\d{5}$/.test(receiverCode)) {
+    if (
+      !/^\d{5}$/.test(
+        receiverCode
+      )
+    ) {
       return res.status(400).json({
         error:
           'رمز المستخدم يجب أن يتكون من 5 أرقام'
@@ -597,7 +918,8 @@ app.post(
 
     if (!text) {
       return res.status(400).json({
-        error: 'نص الرسالة مطلوب'
+        error:
+          'نص الرسالة مطلوب'
       });
     }
 
@@ -611,9 +933,14 @@ app.post(
       });
     }
 
-    if (!userExists(receiverCode)) {
+    if (
+      !userExists(
+        receiverCode
+      )
+    ) {
       return res.status(404).json({
-        error: 'المستخدم غير موجود'
+        error:
+          'المستخدم غير موجود'
       });
     }
 
@@ -622,7 +949,8 @@ app.post(
         senderCode:
           req.user.code,
         receiverCode,
-        type: 'text',
+        type:
+          'text',
         text
       });
 
@@ -648,7 +976,6 @@ app.post(
   auth,
   upload.single('file'),
   (req, res) => {
-
     if (!req.file) {
       return res.status(400).json({
         error:
@@ -658,7 +985,9 @@ app.post(
 
     const isVideo =
       req.file.mimetype
-        .startsWith('video/');
+        .startsWith(
+          'video/'
+        );
 
     const type =
       isVideo
@@ -666,7 +995,11 @@ app.post(
         : 'image';
 
     const url =
-      `${req.protocol}://${req.get('host')}/media/${req.file.filename}`;
+      `${req.protocol}://${req.get(
+        'host'
+      )}/media/${
+        req.file.filename
+      }`;
 
     res.json({
       ok: true,
@@ -685,23 +1018,29 @@ app.post(
   '/api/messages/media',
   auth,
   (req, res) => {
-
     const receiverCode =
       String(
-        req.body?.receiverCode || ''
+        req.body?.receiverCode ||
+        ''
       ).trim();
 
     const type =
       String(
-        req.body?.type || ''
+        req.body?.type ||
+        ''
       ).trim();
 
     const mediaUrl =
       String(
-        req.body?.mediaUrl || ''
+        req.body?.mediaUrl ||
+        ''
       ).trim();
 
-    if (!/^\d{5}$/.test(receiverCode)) {
+    if (
+      !/^\d{5}$/.test(
+        receiverCode
+      )
+    ) {
       return res.status(400).json({
         error:
           'رمز المستخدم يجب أن يتكون من 5 أرقام'
@@ -709,8 +1048,10 @@ app.post(
     }
 
     if (
-      !['image', 'video']
-        .includes(type)
+      ![
+        'image',
+        'video'
+      ].includes(type)
     ) {
       return res.status(400).json({
         error:
@@ -725,7 +1066,11 @@ app.post(
       });
     }
 
-    if (!userExists(receiverCode)) {
+    if (
+      !userExists(
+        receiverCode
+      )
+    ) {
       return res.status(404).json({
         error:
           'المستخدم غير موجود'
@@ -762,18 +1107,23 @@ app.post(
   '/api/messages/link',
   auth,
   (req, res) => {
-
     const receiverCode =
       String(
-        req.body?.receiverCode || ''
+        req.body?.receiverCode ||
+        ''
       ).trim();
 
     const url =
       String(
-        req.body?.url || ''
+        req.body?.url ||
+        ''
       ).trim();
 
-    if (!/^\d{5}$/.test(receiverCode)) {
+    if (
+      !/^\d{5}$/.test(
+        receiverCode
+      )
+    ) {
       return res.status(400).json({
         error:
           'رمز المستخدم يجب أن يتكون من 5 أرقام'
@@ -781,8 +1131,9 @@ app.post(
     }
 
     if (
-      !/^https?:\/\/\S+$/i
-        .test(url)
+      !/^https?:\/\/\S+$/i.test(
+        url
+      )
     ) {
       return res.status(400).json({
         error:
@@ -790,7 +1141,11 @@ app.post(
       });
     }
 
-    if (!userExists(receiverCode)) {
+    if (
+      !userExists(
+        receiverCode
+      )
+    ) {
       return res.status(404).json({
         error:
           'المستخدم غير موجود'
@@ -802,8 +1157,10 @@ app.post(
         senderCode:
           req.user.code,
         receiverCode,
-        type: 'link',
-        text: url
+        type:
+          'link',
+        text:
+          url
       });
 
     io.to(
@@ -825,9 +1182,9 @@ app.post(
 // --------------------------------------------------
 io.use(
   (socket, next) => {
-
     const token =
-      socket.handshake.auth?.token;
+      socket.handshake
+        .auth?.token;
 
     if (!token) {
       return next(
@@ -839,9 +1196,8 @@ io.use(
 
     try {
       socket.user =
-        jwt.verify(
-          token,
-          JWT_SECRET
+        verifyAccessToken(
+          token
         );
 
       next();
@@ -849,7 +1205,7 @@ io.use(
     } catch {
       next(
         new Error(
-          'Invalid authentication'
+          'INVALID_OR_EXPIRED_TOKEN'
         )
       );
     }
@@ -862,7 +1218,6 @@ io.use(
 io.on(
   'connection',
   socket => {
-
     const code =
       socket.user.code;
 
@@ -873,17 +1228,17 @@ io.on(
     socket.on(
       'send_message',
       (data, callback) => {
-
         try {
-
           const receiverCode =
             String(
-              data?.receiverCode || ''
+              data?.receiverCode ||
+              ''
             ).trim();
 
           const type =
             String(
-              data?.type || 'text'
+              data?.type ||
+              'text'
             ).trim();
 
           const text =
@@ -911,7 +1266,8 @@ io.on(
           }
 
           if (
-            receiverCode === code
+            receiverCode ===
+            code
           ) {
             throw new Error(
               'لا يمكن الإرسال لنفسك'
@@ -942,7 +1298,8 @@ io.on(
           }
 
           if (
-            type === 'text' &&
+            type ===
+              'text' &&
             !text
           ) {
             throw new Error(
@@ -951,8 +1308,10 @@ io.on(
           }
 
           if (
-            ['image', 'video']
-              .includes(type) &&
+            [
+              'image',
+              'video'
+            ].includes(type) &&
             !mediaUrl
           ) {
             throw new Error(
@@ -962,7 +1321,8 @@ io.on(
 
           const message =
             saveMessage({
-              senderCode: code,
+              senderCode:
+                code,
               receiverCode,
               type,
               text,
@@ -992,7 +1352,6 @@ io.on(
           }
 
         } catch (error) {
-
           if (
             typeof callback ===
             'function'
@@ -1014,7 +1373,6 @@ io.on(
 // --------------------------------------------------
 app.use(
   (err, _, res, __) => {
-
     console.error(
       'Server error:',
       err
