@@ -1,3 +1,4 @@
+
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -50,7 +51,6 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
-    pin_code TEXT,
     phone TEXT,
     name TEXT NOT NULL,
     email TEXT,
@@ -99,11 +99,7 @@ db.exec(`
 // --------------------------------------------------
 // Database migrations
 // --------------------------------------------------
-function ensureColumn(
-  tableName,
-  columnName,
-  definition
-) {
+function ensureColumn(tableName, columnName, definition) {
   const columns = db
     .prepare(`PRAGMA table_info(${tableName})`)
     .all();
@@ -119,20 +115,15 @@ function ensureColumn(
   }
 }
 
-ensureColumn('users', 'pin_code', 'TEXT');
 ensureColumn('users', 'phone', 'TEXT');
 
 // --------------------------------------------------
 // Media
 // --------------------------------------------------
-app.use(
-  '/media',
-  express.static(MEDIA_DIR)
-);
+app.use('/media', express.static(MEDIA_DIR));
 
 const storage = multer.diskStorage({
-  destination: (_, __, cb) =>
-    cb(null, MEDIA_DIR),
+  destination: (_, __, cb) => cb(null, MEDIA_DIR),
 
   filename: (_, file, cb) => {
     const ext = path.extname(
@@ -150,11 +141,9 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-
   limits: {
     fileSize: 100 * 1024 * 1024
   },
-
   fileFilter: (_, file, cb) => {
     const allowed = [
       'image/jpeg',
@@ -175,39 +164,59 @@ const upload = multer({
 });
 
 // --------------------------------------------------
-// Helpers
+// Wasal Code: exactly 15 characters, letters + digits
 // --------------------------------------------------
 const WASAL_CODE_LENGTH = 15;
+
 const WASAL_CODE_ALPHABET =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
-const WASAL_CODE_REGEX = /^[A-Za-z0-9]{15}$/;
+const WASAL_CODE_REGEX =
+  /^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{15}$/;
 
 function generateUserCode() {
-  for (;;) {
-    let code = '';
+  const letters =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
-    for (let i = 0; i < WASAL_CODE_LENGTH; i += 1) {
-      code += WASAL_CODE_ALPHABET[
-        randomInt(0, WASAL_CODE_ALPHABET.length)
-      ];
+  const digits = '0123456789';
+
+  for (;;) {
+    // Guarantee at least one English letter and one digit.
+    const characters = [
+      letters[randomInt(0, letters.length)],
+      digits[randomInt(0, digits.length)]
+    ];
+
+    while (characters.length < WASAL_CODE_LENGTH) {
+      characters.push(
+        WASAL_CODE_ALPHABET[
+          randomInt(0, WASAL_CODE_ALPHABET.length)
+        ]
+      );
     }
+
+    // Shuffle the characters.
+    for (let i = characters.length - 1; i > 0; i -= 1) {
+      const j = randomInt(0, i + 1);
+      [characters[i], characters[j]] =
+        [characters[j], characters[i]];
+    }
+
+    const code = characters.join('');
 
     const exists = db
       .prepare('SELECT id FROM users WHERE code = ?')
       .get(code);
 
-    if (!exists) {
+    if (!exists && WASAL_CODE_REGEX.test(code)) {
       return code;
     }
   }
 }
 
 // --------------------------------------------------
-// Migrate old user codes to 15 alphanumeric characters
+// Migrate codes that do not match the new format
 // --------------------------------------------------
-// This changes legacy codes. Users with old codes must
-// sign in again. Message and status references are updated.
 const migrateLegacyUserCodes = db.transaction(() => {
   const legacyUsers = db
     .prepare('SELECT id, code FROM users')
@@ -257,18 +266,12 @@ const migratedUserCodes = migrateLegacyUserCodes();
 
 if (migratedUserCodes > 0) {
   console.log(
-    `Migrated ${migratedUserCodes} legacy user code(s) to 15 characters.`
-  );
-}
-
-function generatePinCode() {
-  return String(
-    Math.floor(1000 + Math.random() * 9000)
+    `Migrated ${migratedUserCodes} legacy user code(s) to the new format.`
   );
 }
 
 // --------------------------------------------------
-// Access Token
+// Access Token: 15 minutes
 // --------------------------------------------------
 function createAccessToken(user) {
   return jwt.sign(
@@ -285,7 +288,7 @@ function createAccessToken(user) {
 }
 
 // --------------------------------------------------
-// Refresh Token
+// Refresh Token: 30 days
 // --------------------------------------------------
 function createRefreshToken(user) {
   return jwt.sign(
@@ -301,13 +304,6 @@ function createRefreshToken(user) {
 }
 
 // --------------------------------------------------
-// Backward compatibility
-// --------------------------------------------------
-function createToken(user) {
-  return createAccessToken(user);
-}
-
-// --------------------------------------------------
 // Verify Access Token
 // --------------------------------------------------
 function verifyAccessToken(token) {
@@ -315,12 +311,7 @@ function verifyAccessToken(token) {
 
   if (
     !payload ||
-    typeof payload !== 'object'
-  ) {
-    throw new Error('INVALID_TOKEN');
-  }
-
-  if (
+    typeof payload !== 'object' ||
     typeof payload.code !== 'string' ||
     !payload.code
   ) {
@@ -362,15 +353,13 @@ function auth(req, res, next) {
 }
 
 // --------------------------------------------------
-// User Helpers
+// User Helpers — no PIN fields returned
 // --------------------------------------------------
 function getUser(codeOrId) {
   return db.prepare(`
     SELECT
       id,
       code,
-      pin_code AS pinCode,
-      pin_code,
       phone,
       name,
       email,
@@ -453,7 +442,7 @@ app.get('/health', (_, res) => {
   res.json({
     ok: true,
     service: 'wasal-server',
-    version: '3.7.0'
+    version: '3.8.0'
   });
 });
 
@@ -461,7 +450,7 @@ app.get('/', (_, res) => {
   res.json({
     ok: true,
     service: 'wasal-server',
-    version: '3.7.0'
+    version: '3.8.0'
   });
 });
 
@@ -527,7 +516,7 @@ app.post('/api/auth/refresh', (req, res) => {
 });
 
 // --------------------------------------------------
-// Registration
+// Registration — no PIN is generated or returned
 // --------------------------------------------------
 app.post(
   ['/api/users/create', '/api/auth/register'],
@@ -562,22 +551,19 @@ app.post(
       }
 
       const code = generateUserCode();
-      const pinCode = generatePinCode();
 
       const result = db.prepare(`
         INSERT INTO users (
           code,
-          pin_code,
           phone,
           name,
           email,
           password,
           created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
       `).run(
         code,
-        pinCode,
         phone || null,
         name,
         email || null,
@@ -588,8 +574,6 @@ app.post(
       const user = {
         id: Number(result.lastInsertRowid),
         code,
-        pin_code: pinCode,
-        pinCode,
         phone: phone || null,
         name,
         email: email || null
@@ -600,8 +584,6 @@ app.post(
 
       return res.json({
         ok: true,
-        pin_code: pinCode,
-        pinCode,
         user,
         token: accessToken,
         accessToken,
@@ -646,7 +628,7 @@ app.get('/api/users/:code', auth, (req, res) => {
 
   if (!WASAL_CODE_REGEX.test(code)) {
     return res.status(400).json({
-      error: 'رمز وصال يجب أن يتكون من 15 حرفًا إنجليزيًا أو رقمًا'
+      error: 'رمز وصال يجب أن يتكون من 15 خانة ويحتوي على حروف إنجليزية وأرقام'
     });
   }
 
@@ -677,7 +659,7 @@ app.get(
 
     if (!WASAL_CODE_REGEX.test(otherCode)) {
       return res.status(400).json({
-        error: 'رمز وصال يجب أن يتكون من 15 حرفًا إنجليزيًا أو رقمًا'
+        error: 'رمز وصال يجب أن يتكون من 15 خانة ويحتوي على حروف إنجليزية وأرقام'
       });
     }
 
@@ -765,7 +747,7 @@ app.post('/api/messages', auth, (req, res) => {
 
   if (!WASAL_CODE_REGEX.test(receiverCode)) {
     return res.status(400).json({
-      error: 'رمز وصال يجب أن يتكون من 15 حرفًا إنجليزيًا أو رقمًا'
+      error: 'رمز وصال يجب أن يتكون من 15 خانة ويحتوي على حروف إنجليزية وأرقام'
     });
   }
 
@@ -819,7 +801,9 @@ app.post(
       });
     }
 
-    const isVideo = req.file.mimetype.startsWith('video/');
+    const isVideo =
+      req.file.mimetype.startsWith('video/');
+
     const type = isVideo ? 'video' : 'image';
 
     const url =
@@ -852,7 +836,7 @@ app.post('/api/messages/media', auth, (req, res) => {
 
   if (!WASAL_CODE_REGEX.test(receiverCode)) {
     return res.status(400).json({
-      error: 'رمز وصال يجب أن يتكون من 15 حرفًا إنجليزيًا أو رقمًا'
+      error: 'رمز وصال يجب أن يتكون من 15 خانة ويحتوي على حروف إنجليزية وأرقام'
     });
   }
 
@@ -906,7 +890,7 @@ app.post('/api/messages/link', auth, (req, res) => {
 
   if (!WASAL_CODE_REGEX.test(receiverCode)) {
     return res.status(400).json({
-      error: 'رمز وصال يجب أن يتكون من 15 حرفًا إنجليزيًا أو رقمًا'
+      error: 'رمز وصال يجب أن يتكون من 15 خانة ويحتوي على حروف إنجليزية وأرقام'
     });
   }
 
@@ -1002,7 +986,9 @@ io.on('connection', socket => {
         throw new Error('المستخدم غير موجود');
       }
 
-      if (!['text', 'image', 'video', 'link'].includes(type)) {
+      if (
+        !['text', 'image', 'video', 'link'].includes(type)
+      ) {
         throw new Error('نوع الرسالة غير صالح');
       }
 
