@@ -219,6 +219,25 @@ ensureColumn('messages', 'conversation_id', 'TEXT');
 ensureColumn('conversations', 'last_message_id', 'INTEGER');
 ensureColumn('conversations', 'last_message_at', 'TEXT');
 ensureColumn('conversations', 'updated_at', 'TEXT');
+ensureColumn('messages', 'delivered_at', 'TEXT');
+ensureColumn('messages', 'read_at', 'TEXT');
+ensureColumn('messages', 'deleted_at', 'TEXT');
+ensureColumn('messages', 'deleted_for_everyone', 'INTEGER NOT NULL DEFAULT 0');
+
+// --------------------------------------------------
+// الحذف الخاص: من حذف الرسالة لديه فقط (لا يؤثر على الطرف الآخر)
+// --------------------------------------------------
+db.exec(`
+  CREATE TABLE IF NOT EXISTS message_deletes (
+    message_id INTEGER NOT NULL,
+    user_code TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    UNIQUE(message_id, user_code)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_message_deletes_user
+  ON message_deletes(user_code);
+`);
 
 // فهارس إضافية (آمنة ومتكررة التنفيذ)
 db.exec(`
@@ -675,10 +694,17 @@ function formatMessage(msgFromDb, senderNumericId) {
     resolvedContent = msgFromDb.media_url;
   }
 
+  if (msgFromDb.deleted_for_everyone) {
+    resolvedContent = '';
+  }
+
   return {
     id: msgFromDb.id,
     clientId: msgFromDb.client_id ?? null,
     conversationId: msgFromDb.conversation_id ?? null,
+    deliveredAt: msgFromDb.delivered_at ?? null,
+    readAt: msgFromDb.read_at ?? null,
+    deletedForEveryone: Boolean(msgFromDb.deleted_for_everyone),
     senderCode: msgFromDb.sender_code,
     senderId: resolvedSenderId || msgFromDb.sender_code,
     receiverCode: msgFromDb.receiver_code,
@@ -690,21 +716,103 @@ function formatMessage(msgFromDb, senderNumericId) {
   };
 }
 
-function conversationMessages(a, b, limit = 50) {
+function conversationMessages(a, b, limit = 50, viewerCode = a) {
   const safeLimit = Math.max(1, Math.min(100, Number(limit) || 50));
   const rows = db.prepare(`
     SELECT
       m.id, m.sender_code, m.receiver_code, m.type, m.text, m.media_url, m.created_at,
-      m.client_id, m.conversation_id, u.id AS sender_numeric_id
+      m.client_id, m.conversation_id, m.delivered_at, m.read_at,
+      m.deleted_at, m.deleted_for_everyone, u.id AS sender_numeric_id
     FROM messages m
     LEFT JOIN users u ON u.code = m.sender_code
-    WHERE (m.sender_code = ? AND m.receiver_code = ?)
-       OR (m.sender_code = ? AND m.receiver_code = ?)
+    WHERE ((m.sender_code = ? AND m.receiver_code = ?)
+       OR (m.sender_code = ? AND m.receiver_code = ?))
+      AND m.deleted_for_everyone = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM message_deletes d
+        WHERE d.message_id = m.id AND d.user_code = ?
+      )
     ORDER BY m.id DESC
     LIMIT ?
-  `).all(a, b, b, a, safeLimit);
+  `).all(a, b, b, a, viewerCode, safeLimit);
 
   return rows.reverse().map(row => formatMessage(row, row.sender_numeric_id));
+}
+
+// --------------------------------------------------
+// مؤشرات التسليم والقراءة
+// --------------------------------------------------
+function markMessagesDelivered(receiverCode) {
+  const now = new Date().toISOString();
+
+  const pending = db.prepare(`
+    SELECT id, sender_code FROM messages
+    WHERE receiver_code = ? AND delivered_at IS NULL AND deleted_for_everyone = 0
+  `).all(receiverCode);
+
+  if (pending.length === 0) return;
+
+  db.prepare(`
+    UPDATE messages SET delivered_at = ?
+    WHERE receiver_code = ? AND delivered_at IS NULL
+  `).run(now, receiverCode);
+
+  const bySender = new Map();
+  for (const row of pending) {
+    if (!bySender.has(row.sender_code)) bySender.set(row.sender_code, []);
+    bySender.get(row.sender_code).push(row.id);
+  }
+
+  for (const [senderCode, ids] of bySender) {
+    io.to(`user:${senderCode}`).emit('message_delivered', {
+      receiverCode,
+      messageIds: ids,
+      deliveredAt: now
+    });
+  }
+}
+
+function markMessageDeliveredNow(receiverCode, senderCode, messageIds) {
+  if (!Array.isArray(messageIds) || messageIds.length === 0) return;
+  if (!onlineUsers.has(receiverCode)) return;
+
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE messages SET delivered_at = ?
+    WHERE id = ? AND delivered_at IS NULL
+  `).run(now, messageIds[0]);
+
+  io.to(`user:${senderCode}`).emit('message_delivered', {
+    receiverCode,
+    messageIds,
+    deliveredAt: now
+  });
+}
+
+function markConversationRead(viewerCode, otherCode) {
+  const now = new Date().toISOString();
+
+  const pending = db.prepare(`
+    SELECT id FROM messages
+    WHERE receiver_code = ? AND sender_code = ?
+      AND read_at IS NULL AND deleted_for_everyone = 0
+  `).all(viewerCode, otherCode);
+
+  if (pending.length === 0) return;
+
+  db.prepare(`
+    UPDATE messages
+    SET delivered_at = COALESCE(delivered_at, ?), read_at = ?
+    WHERE receiver_code = ? AND sender_code = ? AND read_at IS NULL
+  `).run(now, now, viewerCode, otherCode);
+
+  io.to(`user:${otherCode}`).emit('message_read', {
+    conversationId: canonicalConversationId(viewerCode, otherCode),
+    readerCode: viewerCode,
+    messageIds: pending.map(row => row.id),
+    readAt: now
+  });
 }
 
 function findMessageByClientId(senderCode, clientId) {
@@ -1158,9 +1266,210 @@ const handleGetMessages = (req, res) => {
     });
   }
 
+  // جلب الرسائل يعني أنها وصلت وُقرئت: تحديث المؤشرات وإبلاغ الطرف الآخر
+  markMessagesDelivered(req.user.code);
+  markConversationRead(req.user.code, convInfo.otherCode);
+
   const messages = conversationMessages(req.user.code, convInfo.otherCode, limit);
   res.json({ ok: true, messages });
 };
+
+// --------------------------------------------------
+// حذف الرسائل (لدي فقط / لدى الجميع)
+// --------------------------------------------------
+app.delete('/api/messages/:id', auth, (req, res) => {
+  const messageId = Number(req.params.id);
+
+  if (!Number.isInteger(messageId) || messageId <= 0) {
+    return res.status(400).json({ error: 'معرّف الرسالة غير صالح', code: 'INVALID_MESSAGE_ID' });
+  }
+
+  const row = db.prepare(`
+    SELECT id, sender_code, receiver_code
+    FROM messages WHERE id = ?
+  `).get(messageId);
+
+  if (!row || (row.sender_code !== req.user.code && row.receiver_code !== req.user.code)) {
+    return res.status(404).json({ error: 'الرسالة غير موجودة', code: 'MESSAGE_NOT_FOUND' });
+  }
+
+  const scope = req.query.scope === 'everyone' ? 'everyone' : 'me';
+  const now = new Date().toISOString();
+  const conversationId = canonicalConversationId(row.sender_code, row.receiver_code);
+
+  if (scope === 'everyone') {
+    if (row.sender_code !== req.user.code) {
+      return res.status(403).json({
+        error: 'حذف الرسالة لدى الجميع متاح للمرسل فقط',
+        code: 'DELETE_FOR_EVERYONE_NOT_ALLOWED'
+      });
+    }
+
+    db.prepare(`
+      UPDATE messages SET deleted_for_everyone = 1, deleted_at = ? WHERE id = ?
+    `).run(now, messageId);
+
+    // إبلاغ الطرف الآخر وجميع أجهزة المرسل
+    io.to(`user:${row.receiver_code}`).emit('message_deleted', {
+      messageId, conversationId, scope
+    });
+    io.to(`user:${row.sender_code}`).emit('message_deleted', {
+      messageId, conversationId, scope
+    });
+  } else {
+    db.prepare(`
+      INSERT OR IGNORE INTO message_deletes (message_id, user_code, deleted_at)
+      VALUES (?, ?, ?)
+    `).run(messageId, req.user.code, now);
+  }
+
+  res.json({ ok: true, messageId, scope });
+});
+
+// --------------------------------------------------
+// الحالات (Stories) — صلاحية 24 ساعة
+// --------------------------------------------------
+const STATUS_TTL_HOURS = 24;
+const STATUS_TYPES = ['text', 'image', 'video'];
+
+function formatStatus(row, viewerCode) {
+  return {
+    id: row.id,
+    userCode: row.user_code,
+    wasalCode: row.user_code,
+    authorName: row.author_name || null,
+    type: row.type,
+    text: row.text,
+    mediaUrl: row.media_url,
+    content: row.text || row.media_url || '',
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    isMine: row.user_code === viewerCode,
+    viewsCount: row.views_count ?? 0,
+    viewedByMe: Boolean(row.viewed_by_me)
+  };
+}
+
+app.post('/api/statuses', auth, (req, res) => {
+  const type = String(req.body?.type || 'text').trim();
+  const rawText = String(req.body?.text ?? req.body?.content ?? '').trim();
+  const mediaUrl = String(req.body?.mediaUrl || req.body?.media_url || '').trim();
+
+  if (!STATUS_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'نوع الحالة غير صالح', code: 'INVALID_STATUS_TYPE' });
+  }
+
+  if (type === 'text' && !rawText) {
+    return res.status(400).json({ error: 'نص الحالة مطلوب', code: 'TEXT_REQUIRED' });
+  }
+
+  if (type !== 'text') {
+    const check = validateMediaUrl(mediaUrl, req.get('host'));
+    if (!check.ok) {
+      return res.status(400).json({
+        error: 'رابط وسائط الحالة غير مسموح',
+        code: check.code
+      });
+    }
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + STATUS_TTL_HOURS * 60 * 60 * 1000).toISOString();
+
+  const result = db.prepare(`
+    INSERT INTO statuses (user_code, type, text, media_url, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    req.user.code,
+    type,
+    type === 'text' ? rawText : null,
+    type === 'text' ? null : (mediaUrl || rawText),
+    now.toISOString(),
+    expiresAt
+  );
+
+  const row = db.prepare(`
+    SELECT id, user_code, type, text, media_url, created_at, expires_at,
+      0 AS views_count, 0 AS viewed_by_me, ? AS author_name
+    FROM statuses WHERE id = ?
+  `).get(req.user.name || null, Number(result.lastInsertRowid));
+
+  res.status(201).json({ ok: true, status: formatStatus(row, req.user.code) });
+});
+
+app.get('/api/statuses', auth, (req, res) => {
+  // تنظيف الحالات المنتهية الصلاحية
+  db.prepare('DELETE FROM statuses WHERE expires_at <= ?').run(new Date().toISOString());
+
+  const rows = db.prepare(`
+    SELECT s.id, s.user_code, s.type, s.text, s.media_url, s.created_at, s.expires_at,
+      u.name AS author_name,
+      (SELECT COUNT(*) FROM status_views v WHERE v.status_id = s.id) AS views_count,
+      EXISTS (
+        SELECT 1 FROM status_views v
+        WHERE v.status_id = s.id AND v.viewer_code = ?
+      ) AS viewed_by_me
+    FROM statuses s
+    LEFT JOIN users u ON u.code = s.user_code
+    WHERE s.expires_at > ?
+      AND (s.user_code = ? OR s.user_code IN (
+        SELECT CASE WHEN c.user1_code = ? THEN c.user2_code ELSE c.user1_code END
+        FROM conversations c
+        WHERE c.user1_code = ? OR c.user2_code = ?
+      ))
+    ORDER BY s.created_at DESC
+    LIMIT 100
+  `).all(
+    req.user.code,
+    new Date().toISOString(),
+    req.user.code,
+    req.user.code,
+    req.user.code,
+    req.user.code
+  );
+
+  res.json({ ok: true, statuses: rows.map(row => formatStatus(row, req.user.code)) });
+});
+
+app.post('/api/statuses/:id/view', auth, (req, res) => {
+  const statusId = Number(req.params.id);
+
+  if (!Number.isInteger(statusId) || statusId <= 0) {
+    return res.status(400).json({ error: 'معرّف الحالة غير صالح', code: 'INVALID_STATUS_ID' });
+  }
+
+  const row = db.prepare('SELECT id, user_code FROM statuses WHERE id = ?').get(statusId);
+
+  if (!row || row.user_code === req.user.code) {
+    return res.status(404).json({ error: 'الحالة غير موجودة', code: 'STATUS_NOT_FOUND' });
+  }
+
+  db.prepare(`
+    INSERT OR IGNORE INTO status_views (status_id, viewer_code, viewed_at)
+    VALUES (?, ?, ?)
+  `).run(statusId, req.user.code, new Date().toISOString());
+
+  res.json({ ok: true, statusId });
+});
+
+app.delete('/api/statuses/:id', auth, (req, res) => {
+  const statusId = Number(req.params.id);
+
+  if (!Number.isInteger(statusId) || statusId <= 0) {
+    return res.status(400).json({ error: 'معرّف الحالة غير صالح', code: 'INVALID_STATUS_ID' });
+  }
+
+  const row = db.prepare('SELECT id, user_code FROM statuses WHERE id = ?').get(statusId);
+
+  if (!row || row.user_code !== req.user.code) {
+    return res.status(404).json({ error: 'الحالة غير موجودة أو ليست لك', code: 'STATUS_NOT_FOUND' });
+  }
+
+  db.prepare('DELETE FROM status_views WHERE status_id = ?').run(statusId);
+  db.prepare('DELETE FROM statuses WHERE id = ?').run(statusId);
+
+  res.json({ ok: true, statusId });
+});
 
 app.get('/api/conversations/:code/messages', auth, handleGetMessages);
 app.get('/api/messages/conversation/:conversationId', auth, handleGetMessages);
@@ -1255,6 +1564,9 @@ const handleSendMessage = (req, res) => {
   });
 
   io.to(`user:${receiverCode}`).emit('message', saved.message);
+
+  // المستقبِل متصل الآن: الرسالة مُسلَّمة فورًا
+  markMessageDeliveredNow(receiverCode, req.user.code, [saved.message.id]);
 
   return res.status(201).json({
     ok: true,
@@ -1352,6 +1664,9 @@ io.on('connection', socket => {
     .run(new Date().toISOString(), code);
   io.emit('presence', { code, isOnline: true });
 
+  // عند اتصال أي جهاز: رسائله المؤجلة تُعتبر مُسلَّمة، ويُبلَّغ المرسلين
+  markMessagesDelivered(code);
+
   socket.on('send_message', (data, callback) => {
     try {
       let receiverCode = String(data?.receiverCode || '').trim();
@@ -1403,6 +1718,9 @@ io.on('connection', socket => {
       io.to(`user:${receiverCode}`).emit('message', saved.message);
       socket.emit('message_sent', saved.message);
 
+      // المستقبِل متصل الآن: الرسالة مُسلَّمة فورًا
+      markMessageDeliveredNow(receiverCode, code, [saved.message.id]);
+
       if (typeof callback === 'function') {
         callback({ ok: true, message: saved.message, deduplicated: saved.deduplicated });
       }
@@ -1411,6 +1729,27 @@ io.on('connection', socket => {
         callback({ ok: false, error: error.message });
       }
     }
+  });
+
+  // مؤشر «جارٍ الكتابة…» — يُمرَّر إلى جميع أجهزة الطرف الآخر
+  socket.on('typing', data => {
+    const conversationId = String(data?.conversationId || '').trim();
+    const isTyping = Boolean(data?.isTyping);
+    let otherCode = String(data?.to || '').trim();
+
+    if (conversationId) {
+      const info = getExistingConversation(conversationId, code);
+      if (!info) return;
+      otherCode = info.otherCode;
+    }
+
+    if (!otherCode || !WASAL_CODE_REGEX.test(otherCode) || otherCode === code) return;
+
+    io.to(`user:${otherCode}`).emit('typing', {
+      conversationId: canonicalConversationId(code, otherCode),
+      from: code,
+      isTyping
+    });
   });
 
   socket.on('disconnect', () => {
