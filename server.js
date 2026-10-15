@@ -223,6 +223,7 @@ ensureColumn('messages', 'delivered_at', 'TEXT');
 ensureColumn('messages', 'read_at', 'TEXT');
 ensureColumn('messages', 'deleted_at', 'TEXT');
 ensureColumn('messages', 'deleted_for_everyone', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('users', 'bio', 'TEXT');
 
 // --------------------------------------------------
 // الحذف الخاص: من حذف الرسالة لديه فقط (لا يؤثر على الطرف الآخر)
@@ -583,6 +584,7 @@ function formatUser(userFromDb) {
     name: userFromDb.name,
     displayName: userFromDb.name,
     email: userFromDb.email ?? null,
+    bio: userFromDb.bio ?? '',
     avatarUrl: null,
     isOnline: isUserOnline(userFromDb.code),
     lastSeenAt: userFromDb.lastSeenAt ?? null,
@@ -597,12 +599,12 @@ function getUser(codeOrId) {
 
   if (/^\d+$/.test(paramStr)) {
     row = db.prepare(`
-      SELECT id, code, phone, name, email, created_at AS createdAt, last_seen_at AS lastSeenAt
+      SELECT id, code, phone, name, email, bio, created_at AS createdAt, last_seen_at AS lastSeenAt
       FROM users WHERE id = ?
     `).get(Number(paramStr));
   } else if (WASAL_CODE_REGEX.test(paramStr)) {
     row = db.prepare(`
-      SELECT id, code, phone, name, email, created_at AS createdAt, last_seen_at AS lastSeenAt
+      SELECT id, code, phone, name, email, bio, created_at AS createdAt, last_seen_at AS lastSeenAt
       FROM users WHERE code = ?
     `).get(paramStr);
   }
@@ -1109,6 +1111,21 @@ app.put('/api/users/me/display-name', auth, (req, res) => {
   }
 
   db.prepare('UPDATE users SET name = ? WHERE code = ?').run(newName, req.user.code);
+  const user = getUser(req.user.code);
+  res.json({ ok: true, user });
+});
+
+app.put('/api/users/me/bio', auth, (req, res) => {
+  const newBio = String(req.body?.bio ?? '').trim();
+
+  if (newBio.length > 200) {
+    return res.status(400).json({
+      error: 'النبذة يجب ألا تتجاوز 200 حرف',
+      code: 'BIO_TOO_LONG'
+    });
+  }
+
+  db.prepare('UPDATE users SET bio = ? WHERE code = ?').run(newBio, req.user.code);
   const user = getUser(req.user.code);
   res.json({ ok: true, user });
 });
